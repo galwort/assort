@@ -11,8 +11,8 @@ def _suggest_categories(
 ) -> List[str]:
     prompt = (
         "You are a conversation categorizer. "
-        f"Return between {min_clusters} and {max_clusters} category names that best group these texts "
-        "as a JSON array of strings."
+        f"Return between {min_clusters} and {max_clusters} category names that best group these texts. "
+        'Respond with a JSON array, like: ["Category A", "Category B", "Category C"] — nothing else.'
     )
     messages = [
         {"role": "system", "content": prompt},
@@ -21,7 +21,11 @@ def _suggest_categories(
     response = _client.chat.completions.create(
         model=_MODEL, messages=messages, temperature=0
     )
-    return json.loads(response.choices[0].message.content)
+    content = response.choices[0].message.content.strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        raise ValueError(f"Model response was not valid JSON: {content}")
 
 
 def _assign(conversation: str, categories: List[str]) -> str:
