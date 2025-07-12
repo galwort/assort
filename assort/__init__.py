@@ -1,5 +1,4 @@
-__version__ = "0.0.1"
+from .core import categorize
 
-
-def run():
-    return "Beauty is a pattern our minds recognize but don't fully understand."
+__all__ = ["categorize"]
+__version__ = "0.1.0"
