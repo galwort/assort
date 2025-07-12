@@ -1,0 +1,18 @@
+[project]
+name = "assort"
+version = "0.0.1"
+description = "Using AI to sort lists of unstructured text through iterative batches."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Tom Gorbett", email = "wthomasgorbett@gmail.com" }]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
