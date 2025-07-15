@@ -61,7 +61,7 @@ def _gen_categories(
 
 
 def _create_SortModel(category_keys: List[str]) -> BaseModel:
-    fields = {key: (ConfidenceLevel, ConfidenceLevel.high) for key in category_keys}
+    fields = {key: (ConfidenceLevel, ConfidenceLevel.low) for key in category_keys}
     SortModel = create_model("SortModel", **fields)
     return SortModel
 
