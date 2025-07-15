@@ -4,6 +4,7 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, create_model
 from time import sleep
 from typing import List, Dict
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
 
 class CategoryModel(BaseModel):
@@ -102,11 +103,17 @@ def assort(
 ) -> Dict[str, List[int]]:
     categories = _gen_categories(batch, min_clusters, max_clusters)
     sorted_results = {key: [] for key in categories}
-
-    for text in batch:
-        sort_data = _gen_sort(text, categories)
-        for key in categories:
-            if sort_data[key] == ConfidenceLevel.high:
-                sorted_results[key].append(text)
-
+    with Progress(
+        TextColumn("[bold blue]Processing"),
+        BarColumn(),
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        TimeRemainingColumn(),
+    ) as progress:
+        task = progress.add_task("Sorting", total=len(batch))
+        for text in batch:
+            sort_data = _gen_sort(text, categories)
+            for key in categories:
+                if sort_data[key] == ConfidenceLevel.high:
+                    sorted_results[key].append(text)
+            progress.update(task, advance=1)
     return sorted_results
