@@ -1,5 +1,4 @@
 from enum import Enum
-from json import loads, dumps
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, create_model
 from time import sleep
