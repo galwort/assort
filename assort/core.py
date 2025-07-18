@@ -111,6 +111,10 @@ def assort(
 ) -> Dict[str, List[int]]:
     categories = _gen_categories(batch, min_clusters, max_clusters)
     sorted_results = {key: [] for key in categories}
+
+    if policy == Policy.exhaustive:
+        sorted_results["Miscellaneous"] = []
+
     with Progress(
         TextColumn("[bold blue]Processing"),
         BarColumn(),
@@ -127,6 +131,9 @@ def assort(
                 for key in high_keys:
                     sorted_results[key].append(text)
             elif policy == Policy.exhaustive:
-                sorted_results[choice(high_keys)].append(text)
+                if high_keys:
+                    sorted_results[choice(high_keys)].append(text)
+                else:
+                    sorted_results["Miscellaneous"].append(text)
             progress.update(task, advance=1)
     return sorted_results
