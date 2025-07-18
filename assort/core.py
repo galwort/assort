@@ -1,6 +1,7 @@
 from enum import Enum
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, create_model
+from random import choice
 from time import sleep
 from typing import List, Dict
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
@@ -14,6 +15,11 @@ class ConfidenceLevel(str, Enum):
     high = "high"
     medium = "medium"
     low = "low"
+
+
+class Policy(str, Enum):
+    fuzzy = "fuzzy"
+    exhaustive = "exhaustive"
 
 
 _MODEL = "gpt-4o-mini"
@@ -98,7 +104,10 @@ def _gen_sort(text: str, category_keys: List[str]) -> str:
 
 
 def assort(
-    batch: List[str], min_clusters: int = 2, max_clusters: int = 5
+    batch: List[str],
+    min_clusters: int = 2,
+    max_clusters: int = 5,
+    policy: Policy = Policy.fuzzy,
 ) -> Dict[str, List[int]]:
     categories = _gen_categories(batch, min_clusters, max_clusters)
     sorted_results = {key: [] for key in categories}
@@ -111,8 +120,11 @@ def assort(
         task = progress.add_task("Sorting", total=len(batch))
         for text in batch:
             sort_data = _gen_sort(text, categories)
-            for key in categories:
-                if sort_data[key] == ConfidenceLevel.high:
+            high_keys = [
+                key for key in categories if sort_data[key] == ConfidenceLevel.high
+            ]
+            if policy == Policy.fuzzy:
+                for key in high_keys:
                     sorted_results[key].append(text)
             progress.update(task, advance=1)
     return sorted_results
