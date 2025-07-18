@@ -126,5 +126,7 @@ def assort(
             if policy == Policy.fuzzy:
                 for key in high_keys:
                     sorted_results[key].append(text)
+            elif policy == Policy.exhaustive:
+                sorted_results[choice(high_keys)].append(text)
             progress.update(task, advance=1)
     return sorted_results
