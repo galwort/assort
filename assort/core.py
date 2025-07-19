@@ -1,12 +1,16 @@
 from enum import Enum
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, create_model
-from random import choice
+from random import choice, shuffle
 from requests import get
 from tiktoken import encoding_for_model
 from time import sleep
 from typing import List, Dict
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+
+
+class OutputFormat(BaseModel):
+    output: str
 
 
 class CategoryModel(BaseModel):
@@ -55,7 +59,12 @@ def _get_model_info(_MODEL: str) -> Dict[str, str]:
         }
 
 
-def _clean_batch(batch: List[str]) -> List[List[str]]:
+def _clean_batch(
+    batch: List[str], randomize: bool = True, summarize: bool = False
+) -> List[List[str]]:
+    if randomize:
+        shuffle(batch)
+
     model_info = _get_model_info(_MODEL)
     encoder = encoding_for_model(_MODEL)
     context_window = model_info["context_window"]
@@ -66,6 +75,35 @@ def _clean_batch(batch: List[str]) -> List[List[str]]:
     token_count = 0
 
     for text in batch:
+        if summarize:
+            system_message = (
+                "You are a text summarizer. "
+                "When given a piece of text, "
+                "you are to summarize it in a concise manner. "
+            )
+
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": text},
+            ]
+
+            while True:
+                try:
+                    response = _client.responses.parse(
+                        model=_MODEL, input=messages, text_format=OutputFormat
+                    )
+                    text = response.output_parsed.output
+                    break
+
+                except OpenAIError as e:
+                    if "rate limit" in str(e).lower():
+                        sleep(60)
+                    elif "insufficient_quota" in str(e).lower():
+                        print(
+                            "Account is not funded, check billing at https://platform.openai.com/settings/organization/billing/"
+                        )
+                        exit()
+
         tokens = encoder.encode(text)
         token_len = len(tokens)
 
