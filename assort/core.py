@@ -2,6 +2,8 @@ from enum import Enum
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, create_model
 from random import choice
+from requests import get
+from tiktoken import encoding_for_model
 from time import sleep
 from typing import List, Dict
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
@@ -26,10 +28,69 @@ _MODEL = "gpt-4o-mini"
 _client = OpenAI()
 
 
+def _get_model_info(_MODEL: str) -> Dict[str, str]:
+    model_json = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    try:
+        response = get(model_json)
+        response.raise_for_status()
+        model_info = response.json()
+        context_window = model_info.get(_MODEL, {}).get("context_window", 0)
+        cost_per_input_token = model_info.get(_MODEL, {}).get(
+            "cost_per_input_token", 0.0
+        )
+        cost_per_output_token = model_info.get(_MODEL, {}).get(
+            "cost_per_output_token", 0.0
+        )
+        return {
+            "context_window": context_window,
+            "cost_per_input_token": cost_per_input_token,
+            "cost_per_output_token": cost_per_output_token,
+        }
+    except Exception as e:
+        print(f"Error fetching model info: {e}")
+        return {
+            "context_window": 0,
+            "cost_per_input_token": 0.0,
+            "cost_per_output_token": 0.0,
+        }
+
+
+def _clean_batch(batch: List[str]) -> List[List[str]]:
+    model_info = _get_model_info(_MODEL)
+    encoder = encoding_for_model(_MODEL)
+    context_window = model_info["context_window"]
+    max_tokens = context_window / 2
+
+    cleaned_batch = []
+    current_batch = []
+    token_count = 0
+
+    for text in batch:
+        tokens = encoder.encode(text)
+        token_len = len(tokens)
+
+        if token_len > max_tokens:
+            continue
+
+        if token_count + token_len > max_tokens:
+            cleaned_batch.append(current_batch)
+            current_batch = []
+            token_count = 0
+
+        current_batch.append(text)
+        token_count += token_len
+
+    if current_batch:
+        cleaned_batch.append(current_batch)
+
+    return cleaned_batch
+
+
 def _gen_categories(
     batch: List[str], min_clusters: int, max_clusters: int
 ) -> List[str]:
     max_clusters = max_clusters - 1
+    cleaned_batch = _clean_batch(batch)
 
     system_message = (
         "You are a text categorizer. "
@@ -46,7 +107,7 @@ def _gen_categories(
 
     messages = [
         {"role": "system", "content": system_message},
-        {"role": "user", "content": "\n\n".join(batch)},
+        {"role": "user", "content": "\n\n".join(cleaned_batch)},
     ]
 
     while True:
