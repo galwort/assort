@@ -319,5 +319,16 @@ def assort(
                         else:
                             sorted_results[choice(high_keys)].append(text)
 
+                if "Miscellaneous" in sorted_results:
+                    fat_cats = [
+                        key for key, value in sorted_results.items() if len(value) > 0
+                    ]
+                    fat_cats.remove("Miscellaneous")
+                    average_cat_fat = sum(
+                        len(sorted_results[key]) for key in fat_cats
+                    ) / len(fat_cats)
+                    if len(sorted_results["Miscellaneous"]) > average_cat_fat * 2:
+                        pass
+
             progress.update(task, advance=1)
     return sorted_results
