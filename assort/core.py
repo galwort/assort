@@ -87,22 +87,27 @@ def _clean_batch(batch: List[str]) -> List[List[str]]:
 
 
 def _gen_categories(
-    batch: List[str], min_clusters: int, max_clusters: int
+    batch: List[str], min_clusters: int, max_clusters: int, description: str = ""
 ) -> List[str]:
     max_clusters = max_clusters - 1
     cleaned_batch = _clean_batch(batch)
 
+    description = (
+        "A description of the batch is as follows: " + description
+        if description
+        else ""
+    )
+
     system_message = (
         "You are a text categorizer. "
-        + "When given a batch of objects, you are to come up with "
-        + f"between {min_clusters} and NO MORE THAN {max_clusters} distinct categories "
-        + "that the objects could be distinctly sorted into. "
-        + "\n"
-        + "-" * 80
-        + "\n"
-        + "Your reply should be in JSON format, with categories as a single key, "
-        + "followed by a list of categories that the objects would best fit into. "
-        + f"And remember - do not create more than {max_clusters} categories."
+        "When given a batch of objects, you are to come up with "
+        f"between {min_clusters} and NO MORE THAN {max_clusters} distinct categories "
+        "that the objects could be distinctly sorted into. "
+        f"{description}\n"
+        f"{'-' * 80}\n"
+        "Your reply should be in JSON format, with categories as a single key, "
+        "followed by a list of categories that the objects would best fit into. "
+        f"And remember - do not create more than {max_clusters} categories."
     )
 
     messages = [
@@ -132,12 +137,20 @@ def _create_SortModel(category_keys: List[str]) -> BaseModel:
     return SortModel
 
 
-def _gen_sort(text: str, category_keys: List[str]) -> str:
+def _gen_sort(text: str, category_keys: List[str], description: str = None) -> str:
     SortModel = _create_SortModel(category_keys)
+    description = (
+        "The categories are generated from a larger set, which has been described as follows: "
+        + description
+        if description
+        else ""
+    )
+
     system_message = (
         "You are a text sorter. "
         "When given a piece of text, you are to sort it into one of the following categories "
         f"{', '.join(category_keys)}. "
+        f"{description}\n"
         "You should also provide a confidence level of high, medium, or low for each category. "
         "Your reply should be in JSON format, with the keys being the category names "
         "and the values being the confidence level for that category."
@@ -169,8 +182,9 @@ def assort(
     min_clusters: int = 2,
     max_clusters: int = 5,
     policy: Policy = Policy.fuzzy,
+    description: str = "",
 ) -> Dict[str, List[int]]:
-    categories = _gen_categories(batch, min_clusters, max_clusters)
+    categories = _gen_categories(batch, min_clusters, max_clusters, description)
     sorted_results = {key: [] for key in categories}
 
     if policy == Policy.exhaustive:
@@ -184,7 +198,7 @@ def assort(
     ) as progress:
         task = progress.add_task("Sorting", total=len(batch))
         for text in batch:
-            sort_data = _gen_sort(text, categories)
+            sort_data = _gen_sort(text, categories, description)
             high_keys = [
                 key for key in categories if sort_data[key] == ConfidenceLevel.high
             ]

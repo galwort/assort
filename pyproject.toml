@@ -1,6 +1,6 @@
 [project]
 name = "assort"
-version = "0.3.0"
+version = "0.3.1"
 description = "Using AI to sort lists of unstructured text through iterative batches."
 readme = "README.md"
 dependencies = [

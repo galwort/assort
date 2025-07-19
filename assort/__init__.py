@@ -1,4 +1,4 @@
 from .core import assort
 
 __all__ = ["assort"]
-__version__ = "0.3.0"
+__version__ = "0.3.1"
