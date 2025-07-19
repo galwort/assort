@@ -176,6 +176,8 @@ def _create_SortModel(category_keys: List[str]) -> BaseModel:
 
 
 def _gen_sort(text: str, category_keys: List[str], description: str = None) -> str:
+    if "Miscellaneous" in category_keys:
+        category_keys.remove("Miscellaneous")
     SortModel = _create_SortModel(category_keys)
     description = (
         "The categories are generated from a larger set, which has been described as follows: "
