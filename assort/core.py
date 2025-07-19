@@ -215,6 +215,49 @@ def _gen_sort(text: str, category_keys: List[str], description: str = None) -> s
                 exit()
 
 
+def _gen_combined_category(high_keys: List[str]) -> str:
+    user_message = (
+        "Given the following categories, respond with a confidence level "
+        + "of 'high', 'medium', or 'low' on whether they should be combined: "
+        + f"{', '.join(high_keys)}. "
+    )
+
+    while True:
+        try:
+            response = _client.responses.parse(
+                model=_MODEL,
+                input={"role": "user", "content": user_message},
+                text_format=ConfidenceLevel,
+            )
+
+            if response.output_parsed in ConfidenceLevel.high:
+                user_message = (
+                    "The categories should be combined. "
+                    "Please provide a single name for the combined category."
+                    "The new category name should be in proper case. "
+                    "Do not add asterisks or any other special characters. "
+                    "Do not include any other information in your response."
+                )
+                response = _client.responses.parse(
+                    model=_MODEL,
+                    input={"role": "user", "content": user_message},
+                    text_format=OutputFormat,
+                )
+                return response.output_parsed
+
+            else:
+                return None
+
+        except OpenAIError as e:
+            if "rate limit" in str(e).lower():
+                sleep(60)
+            elif "insufficient_quota" in str(e).lower():
+                print(
+                    "Account is not funded, check billing at https://platform.openai.com/settings/organization/billing/"
+                )
+                exit()
+
+
 def assort(
     batch: List[str],
     min_clusters: int = 2,
@@ -227,6 +270,7 @@ def assort(
 
     if policy == Policy.exhaustive:
         sorted_results["Miscellaneous"] = []
+        high_key_counter = {}
 
     with Progress(
         TextColumn("[bold blue]Processing"),
@@ -244,9 +288,34 @@ def assort(
                 for key in high_keys:
                     sorted_results[key].append(text)
             elif policy == Policy.exhaustive:
-                if high_keys:
-                    sorted_results[choice(high_keys)].append(text)
-                else:
+                if len(high_keys) == 0:
                     sorted_results["Miscellaneous"].append(text)
+                elif len(high_keys) == 1:
+                    sorted_results[high_keys[0]].append(text)
+                else:
+                    high_keys.sort()
+                    high_key_concat = " + ".join(high_keys)
+                    high_key_counter[high_key_concat] = (
+                        high_key_counter.get(high_key_concat, 0) + 1
+                    )
+
+                    if high_key_counter[high_key_concat] > 5:
+                        combined_category = _gen_combined_category(high_keys)
+
+                        if combined_category:
+                            if combined_category not in sorted_results:
+                                sorted_results[combined_category] = []
+
+                            for key in high_keys:
+                                if key in sorted_results:
+                                    sorted_results[combined_category].extend(
+                                        sorted_results[key]
+                                    )
+                                    sorted_results[key] = []
+
+                            sorted_results[combined_category].append(text)
+                        else:
+                            sorted_results[choice(high_keys)].append(text)
+
             progress.update(task, advance=1)
     return sorted_results
