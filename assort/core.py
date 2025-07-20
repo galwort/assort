@@ -59,6 +59,24 @@ def _get_model_info(_MODEL: str) -> Dict[str, str]:
         }
 
 
+_model_info_cache = _get_model_info(_MODEL)
+_encoder = encoding_for_model(_MODEL)
+_cost_tracker = 0.0
+
+
+def _add_cost(messages, response_text):
+    global _cost_tracker
+    if isinstance(messages, list):
+        input_tokens = sum(len(_encoder.encode(m["content"])) for m in messages)
+    else:
+        input_tokens = len(_encoder.encode(messages["content"]))
+    output_tokens = len(_encoder.encode(response_text))
+    _cost_tracker += (
+        input_tokens * _model_info_cache["cost_per_input_token"]
+        + output_tokens * _model_info_cache["cost_per_output_token"]
+    )
+
+
 def _clean_batch(
     batch: List[str], randomize: bool = True, summarize: bool = False
 ) -> List[List[str]]:
@@ -93,6 +111,7 @@ def _clean_batch(
                         model=_MODEL, input=messages, text_format=OutputFormat
                     )
                     text = response.output_parsed.output
+                    _add_cost(messages, text)
                     break
 
                 except OpenAIError as e:
@@ -158,6 +177,7 @@ def _gen_categories(
             response = _client.responses.parse(
                 model=_MODEL, input=messages, text_format=CategoryModel
             )
+            _add_cost(messages, str(response.output_parsed.categories))
             return response.output_parsed.categories
         except OpenAIError as e:
             if "rate limit" in str(e).lower():
@@ -206,6 +226,7 @@ def _gen_sort(text: str, category_keys: List[str], description: str = None) -> s
             response = _client.responses.parse(
                 model=_MODEL, input=messages, text_format=SortModel
             )
+            _add_cost(messages, str(response.output_parsed.model_dump()))
             return response.output_parsed.model_dump()
         except OpenAIError as e:
             if "rate limit" in str(e).lower():
@@ -231,6 +252,7 @@ def _gen_combined_category(high_keys: List[str]) -> str:
                 input={"role": "user", "content": user_message},
                 text_format=ConfidenceLevel,
             )
+            _add_cost({"role": "user", "content": user_message}, response.output_parsed)
 
             if response.output_parsed in ConfidenceLevel.high:
                 user_message = (
@@ -245,7 +267,11 @@ def _gen_combined_category(high_keys: List[str]) -> str:
                     input={"role": "user", "content": user_message},
                     text_format=OutputFormat,
                 )
-                return response.output_parsed
+                _add_cost(
+                    {"role": "user", "content": user_message},
+                    response.output_parsed.output,
+                )
+                return response.output_parsed.output
 
             else:
                 return None
@@ -267,6 +293,8 @@ def assort(
     policy: Policy = Policy.fuzzy,
     description: str = "",
 ) -> Dict[str, List[int]]:
+    global _cost_tracker
+    _cost_tracker = 0.0
     categories = _gen_categories(batch, min_clusters, max_clusters, description)
     sorted_results = {key: [] for key in categories}
 
@@ -386,4 +414,4 @@ def assort(
                                     )
 
             progress.update(task, advance=1)
-    return sorted_results
+    return {"sorted_results": sorted_results, "cost": _cost_tracker}
