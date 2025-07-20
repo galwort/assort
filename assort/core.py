@@ -335,7 +335,7 @@ def assort(
     ) as progress:
         task = progress.add_task("Sorting", total=len(batch))
         for i, text in enumerate(batch):
-            categories = sorted_results.keys()
+            categories = list(sorted_results.keys())
             sort_data = _gen_sort(text, categories, description)
             high_keys = [
                 key for key in categories if sort_data[key] == ConfidenceLevel.high
