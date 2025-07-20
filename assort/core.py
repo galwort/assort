@@ -64,6 +64,22 @@ _encoder = encoding_for_model(_MODEL)
 _cost_tracker = 0.0
 
 
+def _estimate_cost(batch: List[str], policy: Policy) -> float:
+    calls = 1 + len(batch)
+    if policy == Policy.exhaustive:
+        calls += len(batch)
+    input_tokens = len(_encoder.encode("\n\n".join(batch))) + sum(
+        len(_encoder.encode(t)) for t in batch
+    )
+    if policy == Policy.exhaustive:
+        input_tokens += sum(len(_encoder.encode(t)) for t in batch)
+    output_tokens = calls * 50
+    return (
+        input_tokens * _model_info_cache["cost_per_input_token"]
+        + output_tokens * _model_info_cache["cost_per_output_token"]
+    )
+
+
 def _add_cost(messages, response_text):
     global _cost_tracker
     if isinstance(messages, list):
@@ -292,9 +308,18 @@ def assort(
     max_clusters: int = 5,
     policy: Policy = Policy.fuzzy,
     description: str = "",
+    print_estimate: bool = True,
+    confirm: bool = False,
 ) -> Dict[str, List[int]]:
     global _cost_tracker
     _cost_tracker = 0.0
+    if print_estimate or confirm:
+        est_cost = _estimate_cost(batch, policy)
+        print(f"Estimated minimum cost: ${est_cost:.6f}")
+        if confirm:
+            proceed = input("Proceed? (y/n): ").lower()
+            if proceed != "y":
+                return {"sorted_results": {}, "cost": 0.0}
     categories = _gen_categories(batch, min_clusters, max_clusters, description)
     sorted_results = {key: [] for key in categories}
 
