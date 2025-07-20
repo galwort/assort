@@ -382,61 +382,70 @@ def assort(
                         else:
                             sorted_results[choice(high_keys)].append(text)
 
-                if "Miscellaneous" in sorted_results:
+                if len(sorted_results["Miscellaneous"]) > 1:
                     fat_cats = [
                         key for key, value in sorted_results.items() if len(value) > 0
                     ]
                     fat_cats.remove("Miscellaneous")
-                    average_cat_fat = sum(
-                        len(sorted_results[key]) for key in fat_cats
-                    ) / len(fat_cats)
-                    if len(sorted_results["Miscellaneous"]) > average_cat_fat * 2:
-                        cleaned_misc = _clean_batch(sorted_results["Miscellaneous"])
-                        misc_categories = _gen_categories(
-                            cleaned_misc, min_clusters, max_clusters, description
-                        )
-                        misc_high_key_counter = {}
-                        for misc_text in cleaned_misc:
-                            misc_sort_data = _gen_sort(
-                                misc_text, misc_categories, description
+                    if fat_cats:
+                        average_cat_fat = sum(
+                            len(sorted_results[key]) for key in fat_cats
+                        ) / len(fat_cats)
+                        if len(sorted_results["Miscellaneous"]) > average_cat_fat * 2:
+                            cleaned_misc = _clean_batch(sorted_results["Miscellaneous"])
+                            misc_categories = _gen_categories(
+                                cleaned_misc, min_clusters, max_clusters, description
                             )
-                            misc_high_keys = [
-                                key
-                                for key in misc_categories
-                                if misc_sort_data[key] == ConfidenceLevel.high
-                            ]
-                            if len(misc_high_keys) == 0:
-                                sorted_results["Miscellaneous"].append(misc_text)
-                            elif len(misc_high_keys) == 1:
-                                sorted_results[misc_high_keys[0]].append(misc_text)
-                            else:
-                                misc_high_keys.sort()
-                                misc_high_key_concat = " + ".join(misc_high_keys)
-                                if misc_high_key_concat not in misc_high_key_counter:
-                                    misc_high_key_counter[misc_high_key_concat] = 0
-                                misc_high_key_counter[misc_high_key_concat] += 1
-                                if misc_high_key_counter[misc_high_key_concat] > 5:
-                                    misc_combined_category = _gen_combined_category(
-                                        misc_high_keys
-                                    )
-                                    if misc_combined_category:
-                                        if misc_combined_category not in sorted_results:
-                                            sorted_results[misc_combined_category] = []
-
-                                    for key in misc_high_keys:
-                                        if key in sorted_results:
-                                            sorted_results[
-                                                misc_combined_category
-                                            ].extend(sorted_results[key])
-                                            sorted_results[key] = []
-
-                                    sorted_results[misc_combined_category].append(
-                                        misc_text
-                                    )
+                            misc_high_key_counter = {}
+                            for misc_text in cleaned_misc:
+                                misc_sort_data = _gen_sort(
+                                    misc_text, misc_categories, description
+                                )
+                                misc_high_keys = [
+                                    key
+                                    for key in misc_categories
+                                    if misc_sort_data[key] == ConfidenceLevel.high
+                                ]
+                                if len(misc_high_keys) == 0:
+                                    sorted_results["Miscellaneous"].append(misc_text)
+                                elif len(misc_high_keys) == 1:
+                                    sorted_results[misc_high_keys[0]].append(misc_text)
                                 else:
-                                    sorted_results[choice(misc_high_keys)].append(
-                                        misc_text
-                                    )
+                                    misc_high_keys.sort()
+                                    misc_high_key_concat = " + ".join(misc_high_keys)
+                                    if (
+                                        misc_high_key_concat
+                                        not in misc_high_key_counter
+                                    ):
+                                        misc_high_key_counter[misc_high_key_concat] = 0
+                                    misc_high_key_counter[misc_high_key_concat] += 1
+                                    if misc_high_key_counter[misc_high_key_concat] > 5:
+                                        misc_combined_category = _gen_combined_category(
+                                            misc_high_keys
+                                        )
+                                        if misc_combined_category:
+                                            if (
+                                                misc_combined_category
+                                                not in sorted_results
+                                            ):
+                                                sorted_results[
+                                                    misc_combined_category
+                                                ] = []
+
+                                        for key in misc_high_keys:
+                                            if key in sorted_results:
+                                                sorted_results[
+                                                    misc_combined_category
+                                                ].extend(sorted_results[key])
+                                                sorted_results[key] = []
+
+                                        sorted_results[misc_combined_category].append(
+                                            misc_text
+                                        )
+                                    else:
+                                        sorted_results[choice(misc_high_keys)].append(
+                                            misc_text
+                                        )
 
             progress.update(task, advance=1)
     return {"sorted_results": sorted_results, "cost": _cost_tracker}
