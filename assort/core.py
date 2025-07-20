@@ -95,7 +95,7 @@ def _add_cost(messages, response_text):
 
 def _clean_batch(
     batch: List[str], randomize: bool = True, summarize: bool = False
-) -> List[List[str]]:
+) -> List[str]:
     if randomize:
         shuffle(batch)
 
@@ -154,7 +154,7 @@ def _clean_batch(
         token_count += token_len
 
     if current_batch:
-        cleaned_batch.append(current_batch)
+        cleaned_batch.extend(current_batch)
 
     return cleaned_batch
 
