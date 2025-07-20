@@ -343,16 +343,6 @@ def assort(
                 for key in high_keys:
                     sorted_results[key].append(text)
             elif policy == Policy.exhaustive:
-                evict = {}
-                for key, value in sorted_results.items():
-                    if len(value) + 1 < 0.03 * (i + 1):
-                        if "Miscellaneous" not in sorted_results:
-                            sorted_results["Miscellaneous"] = []
-                        sorted_results["Miscellaneous"].extend(value)
-                        evict[key] = value
-                sorted_results = {
-                    k: v for k, v in sorted_results.items() if k not in evict
-                }
                 if len(high_keys) == 0:
                     sorted_results["Miscellaneous"].append(text)
                 elif len(high_keys) == 1:
@@ -447,5 +437,15 @@ def assort(
                                             misc_text
                                         )
 
+                evict = {}
+                for key, value in sorted_results.items():
+                    if len(value) + 1 < 0.03 * (i + 1):
+                        if "Miscellaneous" not in sorted_results:
+                            sorted_results["Miscellaneous"] = []
+                        sorted_results["Miscellaneous"].extend(value)
+                        evict[key] = value
+                sorted_results = {
+                    k: v for k, v in sorted_results.items() if k not in evict
+                }
             progress.update(task, advance=1)
     return {"sorted_results": sorted_results, "cost": _cost_tracker}
