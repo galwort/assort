@@ -2,11 +2,11 @@ from enum import Enum
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, create_model
 from random import choice, shuffle
-from requests import get
-from tiktoken import encoding_for_model
-from time import sleep
-from typing import List, Dict
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+from time import sleep, time
+from typing import List, Dict, Optional, Set
+from tiktoken import encoding_for_model, get_encoding
+from datetime import datetime
+import json
 
 
 class OutputFormat(BaseModel):
@@ -28,278 +28,365 @@ class Policy(str, Enum):
     exhaustive = "exhaustive"
 
 
-_MODEL = "gpt-4o-mini"
+class CombineDecision(BaseModel):
+    decision: ConfidenceLevel
+
+
+DEFAULT_MODEL = "gpt-4o"
+PRICING_TABLE = {
+    "gpt-4o": {
+        "context_window": 200000,
+        "input_per_1m": 2.50,
+        "output_per_1m": 10.00,
+        "encoding": "o200k_base",
+    },
+    "gpt-4o-mini": {
+        "context_window": 200000,
+        "input_per_1m": 0.15,
+        "output_per_1m": 0.60,
+        "encoding": "o200k_base",
+    },
+    "gpt-3.5-turbo": {
+        "context_window": 16385,
+        "input_per_1m": 3.00,
+        "output_per_1m": 6.00,
+        "encoding": "cl100k_base",
+    },
+}
+
 _client = OpenAI()
-
-
-def _get_model_info(_MODEL: str) -> Dict[str, str]:
-    model_json = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-    try:
-        response = get(model_json)
-        response.raise_for_status()
-        model_info = response.json()
-        context_window = model_info.get(_MODEL, {}).get("context_window", 0)
-        cost_per_input_token = model_info.get(_MODEL, {}).get(
-            "cost_per_input_token", 0.0
-        )
-        cost_per_output_token = model_info.get(_MODEL, {}).get(
-            "cost_per_output_token", 0.0
-        )
-        return {
-            "context_window": context_window,
-            "cost_per_input_token": cost_per_input_token,
-            "cost_per_output_token": cost_per_output_token,
-        }
-    except Exception as e:
-        print(f"Error fetching model info: {e}")
-        return {
-            "context_window": 0,
-            "cost_per_input_token": 0.0,
-            "cost_per_output_token": 0.0,
-        }
-
-
-_model_info_cache = _get_model_info(_MODEL)
-_encoder = encoding_for_model(_MODEL)
+_MODEL = DEFAULT_MODEL
+_model_info_cache = {}
+_encoder = get_encoding("cl100k_base")
 _cost_tracker = 0.0
+MAX_RETRIES = 10
 
 
-def _estimate_cost(batch: List[str], policy: Policy) -> float:
-    calls = 1 + len(batch)
-    if policy == Policy.exhaustive:
-        calls += len(batch)
-    input_tokens = len(_encoder.encode("\n\n".join(batch))) + sum(
-        len(_encoder.encode(t)) for t in batch
+def _resolve_model_info(model: str) -> Dict[str, float]:
+    info = PRICING_TABLE.get(
+        model,
+        {
+            "context_window": 100000,
+            "input_per_1m": 0.50,
+            "output_per_1m": 1.50,
+            "encoding": "cl100k_base",
+        },
     )
+    try:
+        enc = encoding_for_model(model)
+    except Exception:
+        try:
+            enc = get_encoding(info.get("encoding", "cl100k_base"))
+        except Exception:
+            enc = get_encoding("cl100k_base")
+    return {
+        "context_window": int(info["context_window"]),
+        "cost_per_input_token": float(info["input_per_1m"]) / 1_000_000.0,
+        "cost_per_output_token": float(info["output_per_1m"]) / 1_000_000.0,
+        "encoding": enc,
+    }
+
+
+def _estimate_cost(
+    batch: List[str], policy: Policy, assumed_output_tokens_per_call: int = 60
+) -> float:
+    texts = [t for t in batch if isinstance(t, str) and t.strip()]
+    if not texts:
+        return 0.0
+    batch_tokens = len(_encoder.encode("\n\n".join(texts)))
+    per_item_tokens = sum(len(_encoder.encode(t)) for t in texts)
+    calls = 1 + len(texts)
     if policy == Policy.exhaustive:
-        input_tokens += sum(len(_encoder.encode(t)) for t in batch)
-    output_tokens = calls * 50
+        per_item_tokens += sum(len(_encoder.encode(t)) for t in texts)
+        calls += len(texts)
+    input_tokens = batch_tokens + per_item_tokens
+    output_tokens = calls * assumed_output_tokens_per_call
     return (
         input_tokens * _model_info_cache["cost_per_input_token"]
         + output_tokens * _model_info_cache["cost_per_output_token"]
     )
 
 
-def _add_cost(messages, response_text):
+def _add_cost(messages, response_text: str, stats: Dict):
     global _cost_tracker
     if isinstance(messages, list):
-        input_tokens = sum(len(_encoder.encode(m["content"])) for m in messages)
+        input_tokens = sum(len(_encoder.encode(m.get("content", ""))) for m in messages)
     else:
-        input_tokens = len(_encoder.encode(messages["content"]))
-    output_tokens = len(_encoder.encode(response_text))
+        input_tokens = len(_encoder.encode(messages.get("content", "")))
+    output_tokens = len(_encoder.encode(response_text or ""))
     _cost_tracker += (
         input_tokens * _model_info_cache["cost_per_input_token"]
         + output_tokens * _model_info_cache["cost_per_output_token"]
     )
+    stats["tokens"]["input"] += int(input_tokens)
+    stats["tokens"]["output"] += int(output_tokens)
 
 
-def _clean_batch(
-    batch: List[str], randomize: bool = True, summarize: bool = False
+def _select_corpus(
+    batch: List[str], randomize: bool = True, ratio: float = 0.4
 ) -> List[str]:
+    texts = [t for t in batch if isinstance(t, str) and t.strip()]
     if randomize:
-        shuffle(batch)
-
-    model_info = _get_model_info(_MODEL)
-    encoder = encoding_for_model(_MODEL)
-    context_window = model_info["context_window"]
-    max_tokens = context_window / 2
-
-    cleaned_batch = []
-    current_batch = []
-    token_count = 0
-
-    for text in batch:
-        if summarize:
-            system_message = (
-                "You are a text summarizer. "
-                "When given a piece of text, "
-                "you are to summarize it in a concise manner. "
-            )
-
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": text},
-            ]
-
-            while True:
-                try:
-                    response = _client.responses.parse(
-                        model=_MODEL, input=messages, text_format=OutputFormat
-                    )
-                    text = response.output_parsed.output
-                    _add_cost(messages, text)
-                    break
-
-                except OpenAIError as e:
-                    if "rate limit" in str(e).lower():
-                        sleep(60)
-                    elif "insufficient_quota" in str(e).lower():
-                        print(
-                            "Account is not funded, check billing at https://platform.openai.com/settings/organization/billing/"
-                        )
-                        exit()
-
-        tokens = encoder.encode(text)
-        token_len = len(tokens)
-
-        if token_len > max_tokens:
+        shuffle(texts)
+    limit = int(_model_info_cache["context_window"] * ratio)
+    selected = []
+    count = 0
+    for t in texts:
+        tok = len(_encoder.encode(t))
+        if tok > limit:
             continue
-
-        if token_count + token_len > max_tokens:
-            cleaned_batch.append(current_batch)
-            current_batch = []
-            token_count = 0
-
-        current_batch.append(text)
-        token_count += token_len
-
-    if current_batch:
-        cleaned_batch.extend(current_batch)
-
-    return cleaned_batch
+        if count + tok > limit:
+            break
+        selected.append(t)
+        count += tok
+    return selected if selected else texts[: max(1, min(len(texts), 50))]
 
 
 def _gen_categories(
-    batch: List[str], min_clusters: int, max_clusters: int, description: str = ""
+    batch: List[str],
+    min_clusters: int,
+    max_clusters: int,
+    description: str,
+    stats: Dict,
 ) -> List[str]:
-    max_clusters = max_clusters - 1
-    cleaned_batch = _clean_batch(batch)
-
-    description = (
-        "A description of the batch is as follows: " + description
+    stats["calls"]["gen_categories"] += 1
+    sample = _select_corpus(batch)
+    desc = (
+        f"A description of the batch is as follows: {description}"
         if description
         else ""
     )
-
     system_message = (
         "You are a text categorizer. "
-        "When given a batch of objects, you are to come up with "
-        f"between {min_clusters} and NO MORE THAN {max_clusters} distinct categories "
-        "that the objects could be distinctly sorted into. "
-        f"{description}\n"
-        f"{'-' * 80}\n"
-        "Your reply should be in JSON format, with categories as a single key, "
-        "followed by a list of categories that the objects would best fit into. "
-        f"And remember - do not create more than {max_clusters} categories."
+        f"When given a batch of objects, generate between {min_clusters} and {max_clusters} distinct categories. "
+        f"{desc}\n"
+        "Reply in JSON with key categories and value as a list of category names."
     )
-
     messages = [
         {"role": "system", "content": system_message},
-        {"role": "user", "content": "\n\n".join(cleaned_batch)},
+        {"role": "user", "content": "\n\n".join(sample)},
     ]
-
-    while True:
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = _client.responses.parse(
                 model=_MODEL, input=messages, text_format=CategoryModel
             )
-            _add_cost(messages, str(response.output_parsed.categories))
-            return response.output_parsed.categories
-        except OpenAIError as e:
-            if "rate limit" in str(e).lower():
-                sleep(60)
-            elif "insufficient_quota" in str(e).lower():
-                print(
-                    "Account is not funded, check billing at https://platform.openai.com/settings/organization/billing/"
-                )
-                exit()
+            cats = [
+                c
+                for c in response.output_parsed.categories
+                if isinstance(c, str) and c.strip()
+            ]
+            if not cats:
+                cats = ["General"]
+            cats = list(dict.fromkeys(cats))
+            _add_cost(messages, json.dumps(cats), stats)
+            return cats
+        except OpenAIError:
+            stats["retries"] += 1
+            sleep(min(30.0, 1.5**attempt))
+    return ["General"]
 
 
 def _create_SortModel(category_keys: List[str]) -> BaseModel:
-    fields = {key: (ConfidenceLevel, ConfidenceLevel.low) for key in category_keys}
-    SortModel = create_model("SortModel", **fields)
-    return SortModel
+    fields = {k: (ConfidenceLevel, ConfidenceLevel.low) for k in category_keys}
+    return create_model("SortModel", **fields)
 
 
-def _gen_sort(text: str, category_keys: List[str], description: str = None) -> str:
-    if "Miscellaneous" in category_keys:
-        category_keys.remove("Miscellaneous")
-    SortModel = _create_SortModel(category_keys)
-    description = (
-        "The categories are generated from a larger set, which has been described as follows: "
-        + description
+def _gen_sort(
+    text: str, category_keys: List[str], description: Optional[str], stats: Dict
+) -> Dict[str, ConfidenceLevel]:
+    stats["calls"]["sort"] += 1
+    keys = [k for k in category_keys if k != "Miscellaneous"]
+    SortModel = _create_SortModel(keys)
+    desc = (
+        f"The categories are generated from a larger set, described as follows: {description}"
         if description
         else ""
     )
-
     system_message = (
         "You are a text sorter. "
-        "When given a piece of text, you are to sort it into one of the following categories "
-        f"{', '.join(category_keys)}. "
-        f"{description}\n"
-        "You should also provide a confidence level of high, medium, or low for each category. "
-        "Your reply should be in JSON format, with the keys being the category names "
-        "and the values being the confidence level for that category."
+        f"When given text, assign confidence for each category from this list: {', '.join(keys)}. "
+        f"{desc}\n"
+        "Provide JSON where keys are category names and values are one of high medium low."
     )
-
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": text},
     ]
-
-    while True:
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = _client.responses.parse(
                 model=_MODEL, input=messages, text_format=SortModel
             )
-            _add_cost(messages, str(response.output_parsed.model_dump()))
-            return response.output_parsed.model_dump()
-        except OpenAIError as e:
-            if "rate limit" in str(e).lower():
-                sleep(60)
-            elif "insufficient_quota" in str(e).lower():
-                print(
-                    "Account is not funded, check billing at https://platform.openai.com/settings/organization/billing/"
-                )
-                exit()
+            data = response.output_parsed.model_dump()
+            _add_cost(messages, json.dumps({k: str(v) for k, v in data.items()}), stats)
+            return data
+        except OpenAIError:
+            stats["retries"] += 1
+            sleep(min(30.0, 1.5**attempt))
+    return {k: ConfidenceLevel.low for k in keys}
 
 
-def _gen_combined_category(high_keys: List[str]) -> str:
-    user_message = (
-        "Given the following categories, respond with a confidence level "
-        + "of 'high', 'medium', or 'low' on whether they should be combined: "
-        + f"{', '.join(high_keys)}. "
-    )
-
-    while True:
+def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
+    stats["calls"]["combine_decision"] += 1
+    sys = {
+        "role": "system",
+        "content": "You decide whether categories should be combined. Reply as JSON with key decision and value one of high medium low.",
+    }
+    user_message = "Categories to evaluate for combination. " + ", ".join(high_keys)
+    messages = [sys, {"role": "user", "content": user_message}]
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = _client.responses.parse(
-                model=_MODEL,
-                input={"role": "user", "content": user_message},
-                text_format=ConfidenceLevel,
+                model=_MODEL, input=messages, text_format=CombineDecision
             )
-            _add_cost({"role": "user", "content": user_message}, response.output_parsed)
-
-            if response.output_parsed in ConfidenceLevel.high:
-                user_message = (
-                    "The categories should be combined. "
-                    "Please provide a single name for the combined category."
-                    "The new category name should be in proper case. "
-                    "Do not add asterisks or any other special characters. "
-                    "Do not include any other information in your response."
-                )
-                response = _client.responses.parse(
-                    model=_MODEL,
-                    input={"role": "user", "content": user_message},
-                    text_format=OutputFormat,
-                )
-                _add_cost(
-                    {"role": "user", "content": user_message},
-                    response.output_parsed.output,
-                )
-                return response.output_parsed.output
-
-            else:
+            decision = response.output_parsed.decision
+            _add_cost(messages, decision.value, stats)
+            if decision == ConfidenceLevel.high:
+                stats["combination_attempts"] += 1
+                stats["calls"]["combine_name"] += 1
+                name_messages = [
+                    {
+                        "role": "system",
+                        "content": "Name a single concise proper case label for the combined category. Return only the name.",
+                    },
+                    {"role": "user", "content": "Provide the name now."},
+                ]
+                for attempt_name in range(1, MAX_RETRIES + 1):
+                    try:
+                        name_resp = _client.responses.parse(
+                            model=_MODEL, input=name_messages, text_format=OutputFormat
+                        )
+                        name = name_resp.output_parsed.output.strip()
+                        _add_cost(name_messages, name, stats)
+                        if name:
+                            stats["combined_merges"] += 1
+                            return name
+                        break
+                    except OpenAIError:
+                        stats["retries"] += 1
+                        sleep(min(30.0, 1.5**attempt_name))
                 return None
+            return None
+        except OpenAIError:
+            stats["retries"] += 1
+            sleep(min(30.0, 1.5**attempt))
+    return None
 
-        except OpenAIError as e:
-            if "rate limit" in str(e).lower():
-                sleep(60)
-            elif "insufficient_quota" in str(e).lower():
-                print(
-                    "Account is not funded, check billing at https://platform.openai.com/settings/organization/billing/"
-                )
-                exit()
+
+def _rename_categories(
+    sorted_results: Dict[str, List[str]], description: str, stats: Dict
+) -> Dict[str, str]:
+    stats["calls"]["rename"] += 1
+    samples = {}
+    for k, v in sorted_results.items():
+        if k == "Miscellaneous":
+            continue
+        if not v:
+            continue
+        chosen = v[: min(20, len(v))]
+        samples[k] = chosen
+    if not samples:
+        return {}
+    prompt = {
+        "task": "Rename categories to be descriptive and specific based on the provided items. Preserve semantic meaning. Return a JSON object mapping original names to new names.",
+        "description": description,
+        "categories": samples,
+    }
+    messages = [
+        {"role": "system", "content": "You rename category labels."},
+        {"role": "user", "content": json.dumps(prompt)},
+    ]
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = _client.responses.parse(
+                model=_MODEL, input=messages, text_format=OutputFormat
+            )
+            text = resp.output_parsed.output
+            _add_cost(messages, text, stats)
+            try:
+                mapping = json.loads(text)
+            except Exception:
+                mapping = {}
+            result = {}
+            used = set()
+            for old, new in mapping.items():
+                if not isinstance(new, str) or not new.strip():
+                    continue
+                nm = new.strip()
+                base = nm
+                idx = 2
+                while nm in used:
+                    nm = f"{base} {idx}"
+                    idx += 1
+                used.add(nm)
+                result[old] = nm
+            return result
+        except OpenAIError:
+            stats["retries"] += 1
+            sleep(min(30.0, 1.5**attempt))
+    return {}
+
+
+def _refine_misc(
+    sorted_results: Dict[str, List[str]],
+    min_clusters: int,
+    max_clusters: int,
+    description: str,
+    stats: Dict,
+):
+    misc = list(sorted_results.get("Miscellaneous", []))
+    if not misc:
+        return
+    non_empty = [
+        k for k, v in sorted_results.items() if k != "Miscellaneous" and len(v) > 0
+    ]
+    avg = (
+        0
+        if not non_empty
+        else sum(len(sorted_results[k]) for k in non_empty) / len(non_empty)
+    )
+    if len(misc) <= max(1, int(avg * 2)):
+        return
+    misc_cats = _gen_categories(misc, min_clusters, max_clusters, description, stats)
+    combo_counts: Dict[str, int] = {}
+    combo_block: Set[str] = set()
+    keep_misc: List[str] = []
+    processed = 0
+    for t in misc:
+        sort_map = _gen_sort(t, misc_cats, description, stats)
+        highs = [k for k in misc_cats if sort_map.get(k) == ConfidenceLevel.high]
+        if len(highs) == 0:
+            keep_misc.append(t)
+        elif len(highs) == 1:
+            if highs[0] not in sorted_results:
+                sorted_results[highs[0]] = []
+            sorted_results[highs[0]].append(t)
+        else:
+            highs.sort()
+            key = " + ".join(highs)
+            combo_counts[key] = combo_counts.get(key, 0) + 1
+            if combo_counts[key] > 5:
+                if key not in combo_block:
+                    new_cat = _gen_combined_category(highs, stats)
+                    if new_cat:
+                        combo_block.add(key)
+                        if new_cat not in sorted_results:
+                            sorted_results[new_cat] = []
+                        for k in highs:
+                            if k in sorted_results:
+                                sorted_results[new_cat].extend(sorted_results[k])
+                                sorted_results[k] = []
+                        sorted_results[new_cat].append(t)
+                    else:
+                        combo_block.add(key)
+                        sorted_results[choice(highs)].append(t)
+                else:
+                    sorted_results[choice(highs)].append(t)
+            else:
+                sorted_results[choice(highs)].append(t)
+        processed += 1
+    sorted_results["Miscellaneous"] = keep_misc
 
 
 def assort(
@@ -308,145 +395,136 @@ def assort(
     max_clusters: int = 5,
     policy: Policy = Policy.fuzzy,
     description: str = "",
-    print_estimate: bool = True,
+    print_estimate: bool = False,
     confirm: bool = False,
-) -> Dict[str, List[int]]:
-    global _cost_tracker
+    max_budget: Optional[float] = None,
+    model: Optional[str] = None,
+    rename_final: bool = True,
+) -> (Dict[str, object], Dict[str, object]):
+    global _MODEL, _model_info_cache, _encoder, _cost_tracker
+    start_time = time()
+    _MODEL = model or DEFAULT_MODEL
+    info = _resolve_model_info(_MODEL)
+    _model_info_cache = {
+        "context_window": info["context_window"],
+        "cost_per_input_token": info["cost_per_input_token"],
+        "cost_per_output_token": info["cost_per_output_token"],
+    }
+    _encoder = info["encoding"]
     _cost_tracker = 0.0
-    if print_estimate or confirm:
-        est_cost = _estimate_cost(batch, policy)
-        print(f"Estimated minimum cost: ${est_cost:.6f}")
+    stats = {
+        "model": _MODEL,
+        "items_total": 0,
+        "initial_categories_count": 0,
+        "final_categories_count": 0,
+        "miscellaneous_count": 0,
+        "calls": {
+            "gen_categories": 0,
+            "sort": 0,
+            "combine_decision": 0,
+            "combine_name": 0,
+            "rename": 0,
+        },
+        "retries": 0,
+        "tokens": {"input": 0, "output": 0},
+        "combination_attempts": 0,
+        "combined_merges": 0,
+        "elapsed_seconds": 0.0,
+        "cost_usd": 0.0,
+        "category_sizes": {},
+    }
+    items = [t for t in batch if isinstance(t, str) and t.strip()]
+    stats["items_total"] = len(items)
+    if not items:
+        results = {"sorted_results": {}}
+        stats["elapsed_seconds"] = time() - start_time
+        stats["cost_usd"] = _cost_tracker
+        return results, stats
+    if print_estimate or confirm or max_budget is not None:
+        est = _estimate_cost(items, policy)
+        if max_budget is not None and est > max_budget:
+            results = {"sorted_results": {}}
+            stats["elapsed_seconds"] = time() - start_time
+            stats["cost_usd"] = 0.0
+            return results, stats
         if confirm:
-            proceed = input("Proceed? (y/n): ").lower()
+            proceed = input("Proceed? (y or n): ").lower().strip()
             if proceed != "y":
-                return {"sorted_results": {}, "cost": 0.0}
-    categories = _gen_categories(batch, min_clusters, max_clusters, description)
-    sorted_results = {key: [] for key in categories}
-
-    if policy == Policy.exhaustive:
-        sorted_results["Miscellaneous"] = []
-        high_key_counter = {}
-
-    with Progress(
-        TextColumn("[bold blue]Processing"),
-        BarColumn(),
-        "[progress.percentage]{task.percentage:>3.0f}%",
-        TimeRemainingColumn(),
-    ) as progress:
-        task = progress.add_task("Sorting", total=len(batch))
-        for i, text in enumerate(batch):
-            categories = list(sorted_results.keys())
-            sort_data = _gen_sort(text, categories, description)
-            high_keys = [
-                key for key in categories if sort_data[key] == ConfidenceLevel.high
-            ]
-            if policy == Policy.fuzzy:
-                for key in high_keys:
-                    sorted_results[key].append(text)
-            elif policy == Policy.exhaustive:
-                if len(high_keys) == 0:
-                    sorted_results["Miscellaneous"].append(text)
-                elif len(high_keys) == 1:
-                    sorted_results[high_keys[0]].append(text)
+                results = {"sorted_results": {}}
+                stats["elapsed_seconds"] = time() - start_time
+                stats["cost_usd"] = 0.0
+                return results, stats
+    initial_categories = _gen_categories(
+        items, min_clusters, max_clusters, description, stats
+    )
+    initial_categories = [c for c in initial_categories if c != "Miscellaneous"]
+    if not initial_categories:
+        initial_categories = ["General"]
+    stats["initial_categories_count"] = len(initial_categories)
+    sorted_results: Dict[str, List[str]] = {k: [] for k in initial_categories}
+    sorted_results["Miscellaneous"] = []
+    combo_counts: Dict[str, int] = {}
+    combo_block: Set[str] = set()
+    for t in items:
+        cats = list(sorted_results.keys())
+        if "Miscellaneous" in cats:
+            cats.remove("Miscellaneous")
+        sort_map = _gen_sort(t, cats, description, stats)
+        highs = [k for k in cats if sort_map.get(k) == ConfidenceLevel.high]
+        if len(highs) == 0:
+            sorted_results["Miscellaneous"].append(t)
+        elif len(highs) == 1:
+            sorted_results[highs[0]].append(t)
+        else:
+            highs.sort()
+            key = " + ".join(highs)
+            combo_counts[key] = combo_counts.get(key, 0) + 1
+            if combo_counts[key] > 5:
+                if key not in combo_block:
+                    new_cat = _gen_combined_category(highs, stats)
+                    if new_cat:
+                        combo_block.add(key)
+                        if new_cat not in sorted_results:
+                            sorted_results[new_cat] = []
+                        for k in highs:
+                            if k in sorted_results:
+                                sorted_results[new_cat].extend(sorted_results[k])
+                                sorted_results[k] = []
+                        sorted_results[new_cat].append(t)
+                    else:
+                        combo_block.add(key)
+                        sorted_results[choice(highs)].append(t)
                 else:
-                    high_keys.sort()
-                    high_key_concat = " + ".join(high_keys)
-                    high_key_counter[high_key_concat] = (
-                        high_key_counter.get(high_key_concat, 0) + 1
-                    )
-
-                    if high_key_counter[high_key_concat] > 5:
-                        combined_category = _gen_combined_category(high_keys)
-
-                        if combined_category:
-                            if combined_category not in sorted_results:
-                                sorted_results[combined_category] = []
-
-                            for key in high_keys:
-                                if key in sorted_results:
-                                    sorted_results[combined_category].extend(
-                                        sorted_results[key]
-                                    )
-                                    sorted_results[key] = []
-
-                            sorted_results[combined_category].append(text)
-                        else:
-                            sorted_results[choice(high_keys)].append(text)
-
-                if len(sorted_results["Miscellaneous"]) > 1:
-                    fat_cats = [
-                        key for key, value in sorted_results.items() if len(value) > 0
-                    ]
-                    fat_cats.remove("Miscellaneous")
-                    if fat_cats:
-                        average_cat_fat = sum(
-                            len(sorted_results[key]) for key in fat_cats
-                        ) / len(fat_cats)
-                        if len(sorted_results["Miscellaneous"]) > average_cat_fat * 2:
-                            cleaned_misc = _clean_batch(sorted_results["Miscellaneous"])
-                            misc_categories = _gen_categories(
-                                cleaned_misc, min_clusters, max_clusters, description
-                            )
-                            misc_high_key_counter = {}
-                            for misc_text in cleaned_misc:
-                                misc_sort_data = _gen_sort(
-                                    misc_text, misc_categories, description
-                                )
-                                misc_high_keys = [
-                                    key
-                                    for key in misc_categories
-                                    if misc_sort_data[key] == ConfidenceLevel.high
-                                ]
-                                if len(misc_high_keys) == 0:
-                                    sorted_results["Miscellaneous"].append(misc_text)
-                                elif len(misc_high_keys) == 1:
-                                    sorted_results[misc_high_keys[0]].append(misc_text)
-                                else:
-                                    misc_high_keys.sort()
-                                    misc_high_key_concat = " + ".join(misc_high_keys)
-                                    if (
-                                        misc_high_key_concat
-                                        not in misc_high_key_counter
-                                    ):
-                                        misc_high_key_counter[misc_high_key_concat] = 0
-                                    misc_high_key_counter[misc_high_key_concat] += 1
-                                    if misc_high_key_counter[misc_high_key_concat] > 5:
-                                        misc_combined_category = _gen_combined_category(
-                                            misc_high_keys
-                                        )
-                                        if misc_combined_category:
-                                            if (
-                                                misc_combined_category
-                                                not in sorted_results
-                                            ):
-                                                sorted_results[
-                                                    misc_combined_category
-                                                ] = []
-
-                                        for key in misc_high_keys:
-                                            if key in sorted_results:
-                                                sorted_results[
-                                                    misc_combined_category
-                                                ].extend(sorted_results[key])
-                                                sorted_results[key] = []
-
-                                        sorted_results[misc_combined_category].append(
-                                            misc_text
-                                        )
-                                    else:
-                                        sorted_results[choice(misc_high_keys)].append(
-                                            misc_text
-                                        )
-
-                evict = {}
-                for key, value in sorted_results.items():
-                    if len(value) + 1 < 0.03 * (i + 1):
-                        if "Miscellaneous" not in sorted_results:
-                            sorted_results["Miscellaneous"] = []
-                        sorted_results["Miscellaneous"].extend(value)
-                        evict[key] = value
-                sorted_results = {
-                    k: v for k, v in sorted_results.items() if k not in evict
-                }
-            progress.update(task, advance=1)
-    return {"sorted_results": sorted_results, "cost": _cost_tracker}
+                    sorted_results[choice(highs)].append(t)
+            else:
+                sorted_results[choice(highs)].append(t)
+    if policy in {Policy.fuzzy, Policy.exhaustive}:
+        _refine_misc(sorted_results, min_clusters, max_clusters, description, stats)
+    if rename_final:
+        mapping = _rename_categories(sorted_results, description, stats)
+        if mapping:
+            new_results: Dict[str, List[str]] = {}
+            for old, items_list in sorted_results.items():
+                if old == "Miscellaneous":
+                    new_results[old] = items_list
+                    continue
+                new_name = (
+                    mapping.get(old, old).strip()
+                    if isinstance(mapping.get(old, old), str)
+                    else old
+                )
+                if not new_name:
+                    new_name = old
+                if new_name not in new_results:
+                    new_results[new_name] = []
+                new_results[new_name].extend(items_list)
+            sorted_results = new_results
+    stats["final_categories_count"] = len(
+        [k for k, v in sorted_results.items() if k != "Miscellaneous"]
+    )
+    stats["miscellaneous_count"] = len(sorted_results.get("Miscellaneous", []))
+    stats["category_sizes"] = {k: len(v) for k, v in sorted_results.items()}
+    stats["elapsed_seconds"] = time() - start_time
+    stats["cost_usd"] = _cost_tracker
+    results = {"sorted_results": sorted_results}
+    return results, stats
