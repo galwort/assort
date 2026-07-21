@@ -32,8 +32,14 @@ class CombineDecision(BaseModel):
     decision: ConfidenceLevel
 
 
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gpt-5.6-luna"
 PRICING_TABLE = {
+    "gpt-5.6-luna": {
+        "context_window": 1_050_000,
+        "input_per_1m": 1.00,
+        "output_per_1m": 6.00,
+        "encoding": "o200k_base",
+    },
     "gpt-4o": {
         "context_window": 200000,
         "input_per_1m": 2.50,
