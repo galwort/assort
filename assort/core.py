@@ -23,11 +23,6 @@ class ConfidenceLevel(str, Enum):
     low = "low"
 
 
-class Policy(str, Enum):
-    fuzzy = "fuzzy"
-    exhaustive = "exhaustive"
-
-
 class CombineDecision(BaseModel):
     decision: ConfidenceLevel
 
@@ -93,19 +88,14 @@ def _resolve_model_info(model: str) -> Dict[str, float]:
     }
 
 
-def _estimate_cost(
-    batch: List[str], policy: Policy, assumed_output_tokens_per_call: int = 60
-) -> float:
+def _estimate_cost(batch: List[str], assumed_output_tokens_per_call: int = 60) -> float:
     texts = [t for t in batch if isinstance(t, str) and t.strip()]
     if not texts:
         return 0.0
     batch_tokens = len(_encoder.encode("\n\n".join(texts)))
     per_item_tokens = sum(len(_encoder.encode(t)) for t in texts)
-    calls = 1 + len(texts)
-    if policy == Policy.exhaustive:
-        per_item_tokens += sum(len(_encoder.encode(t)) for t in texts)
-        calls += len(texts)
-    input_tokens = batch_tokens + per_item_tokens
+    calls = 1 + 2 * len(texts)
+    input_tokens = batch_tokens + 2 * per_item_tokens
     output_tokens = calls * assumed_output_tokens_per_call
     return (
         input_tokens * _model_info_cache["cost_per_input_token"]
@@ -399,7 +389,6 @@ def assort(
     batch: List[str],
     min_clusters: int = 2,
     max_clusters: int = 5,
-    policy: Policy = Policy.fuzzy,
     description: str = "",
     print_estimate: bool = False,
     confirm: bool = False,
@@ -447,7 +436,7 @@ def assort(
         stats["cost_usd"] = _cost_tracker
         return results, stats
     if print_estimate or confirm or max_budget is not None:
-        est = _estimate_cost(items, policy)
+        est = _estimate_cost(items)
         if max_budget is not None and est > max_budget:
             results = {"sorted_results": {}}
             stats["elapsed_seconds"] = time() - start_time
@@ -504,8 +493,7 @@ def assort(
                     sorted_results[choice(highs)].append(t)
             else:
                 sorted_results[choice(highs)].append(t)
-    if policy in {Policy.fuzzy, Policy.exhaustive}:
-        _refine_misc(sorted_results, min_clusters, max_clusters, description, stats)
+    _refine_misc(sorted_results, min_clusters, max_clusters, description, stats)
     if rename_final:
         mapping = _rename_categories(sorted_results, description, stats)
         if mapping:

@@ -78,7 +78,6 @@ results, stats = assort(
     batch,
     min_clusters=2,
     max_clusters=5,
-    policy=None,
     description="",
     print_estimate=False,
     confirm=False,
@@ -95,9 +94,6 @@ Parameters
 
 - `min_clusters` and `max_clusters`
   Bounds for initial category discovery.
-
-- `policy`
-  `Policy.fuzzy` or `Policy.exhaustive`. This affects internal cost estimation. Both modes perform miscellaneous refinement.
 
 - `description`
   Optional corpus context. Helps the model choose better category boundaries and names.
@@ -167,7 +163,7 @@ Returns
 Run with a budget and keep original names
 
 ```python
-from assort import assort, Policy
+from assort import assort
 
 texts = [...]
 results, stats = assort(
@@ -175,7 +171,6 @@ results, stats = assort(
     min_clusters=4,
     max_clusters=8,
     description="Product feedback notes",
-    policy=Policy.fuzzy,
     max_budget=0.75,
     rename_final=False,
 )
