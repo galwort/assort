@@ -429,7 +429,7 @@ def assort(
     sorted_results["Miscellaneous"] = []
     combo_counts: Dict[str, int] = {}
     combo_block: Set[str] = set()
-    for t in items:
+    for i, t in enumerate(items):
         cats = list(sorted_results.keys())
         if "Miscellaneous" in cats:
             cats.remove("Miscellaneous")
@@ -462,6 +462,13 @@ def assort(
                     sorted_results[choice(highs)].append(t)
             else:
                 sorted_results[choice(highs)].append(t)
+        evict = [
+            key
+            for key, value in sorted_results.items()
+            if key != "Miscellaneous" and len(value) + 1 < 0.03 * (i + 1)
+        ]
+        for key in evict:
+            sorted_results["Miscellaneous"].extend(sorted_results.pop(key))
     _refine_misc(sorted_results, min_clusters, max_clusters, description, stats)
     if rename_final:
         mapping = _rename_categories(sorted_results, description, stats)
