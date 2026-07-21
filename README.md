@@ -9,7 +9,7 @@ Text clustering and sorting with an LLM that discovers categories, classifies it
 - Merges overlapping themes when the model judges a high likelihood of overlap
 - Refines the miscellaneous bucket when it is too large
 - Optionally renames categories to be clearer and more specific
-- Tracks tokens and estimated cost in USD
+- Tracks tokens and final cost in USD
 - Simple one function API that returns results and rich stats
 
 ## Install
@@ -46,7 +46,6 @@ results, stats = assort(
 )
 
 print(results["sorted_results"])
-print(round(stats["cost_usd"], 4), "USD")
 ```
 
 Example shape of `sorted_results`
@@ -79,9 +78,6 @@ results, stats = assort(
     min_clusters=2,
     max_clusters=5,
     description="",
-    print_estimate=False,
-    confirm=False,
-    max_budget=None,
     model=None,
     rename_final=True,
 )
@@ -97,15 +93,6 @@ Parameters
 
 - `description`
   Optional corpus context. Helps the model choose better category boundaries and names.
-
-- `print_estimate`
-  If true, a cost estimate is computed before any model calls. The estimate is also used when `confirm` or `max_budget` are set.
-
-- `confirm`
-  If true, the function will prompt in the console before running. Useful for scripts.
-
-- `max_budget`
-  Float in USD. If the estimate exceeds this amount, the function returns an empty result without calling the model.
 
 - `model`
   Optional model name to override the default. If omitted, a capable multimodal GPT model is used by default.
@@ -131,7 +118,7 @@ Returns
   - `tokens` with `input` and `output` counts
   - `combination_attempts` and `combined_merges`
   - `elapsed_seconds`
-  - `cost_usd` estimated from token counts and the internal price table
+  - `cost_usd` calculated from token counts and the internal price table
   - `category_sizes` mapping category to item count
 
 ## How it works
@@ -151,16 +138,14 @@ Returns
 - Renaming for clarity
   At the end, the library proposes clearer names that preserve meaning using a small sample from each category. Names are deduplicated.
 
-## Cost, tokens, and budgets
+## Cost and tokens
 
 - Token accounting uses `tiktoken` with an encoder chosen for the active model.
-- The estimate and the final `cost_usd` are derived from token counts and an internal price table. Treat these as helpful approximations.
-- Use `max_budget` to enforce a strict upper bound before any calls are made.
-- Use `print_estimate` or `confirm` when running in scripts where you want an explicit checkpoint.
+- The final `cost_usd` is calculated from token counts and an internal price table and printed after each run.
 
 ## Advanced examples
 
-Run with a budget and keep original names
+Run and keep original names
 
 ```python
 from assort import assort
@@ -171,7 +156,6 @@ results, stats = assort(
     min_clusters=4,
     max_clusters=8,
     description="Product feedback notes",
-    max_budget=0.75,
     rename_final=False,
 )
 ```
@@ -191,4 +175,3 @@ for name, count in by_size:
 
 - Non deterministic sampling is used during corpus selection, so runs can vary.
 - The module keeps a single OpenAI client and encoder in module scope. In process concurrency is not recommended. Use separate processes for parallel work.
-- The console prompt only appears when `confirm=True`. Avoid this in non interactive environments.

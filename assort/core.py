@@ -88,21 +88,6 @@ def _resolve_model_info(model: str) -> Dict[str, float]:
     }
 
 
-def _estimate_cost(batch: List[str], assumed_output_tokens_per_call: int = 60) -> float:
-    texts = [t for t in batch if isinstance(t, str) and t.strip()]
-    if not texts:
-        return 0.0
-    batch_tokens = len(_encoder.encode("\n\n".join(texts)))
-    per_item_tokens = sum(len(_encoder.encode(t)) for t in texts)
-    calls = 1 + 2 * len(texts)
-    input_tokens = batch_tokens + 2 * per_item_tokens
-    output_tokens = calls * assumed_output_tokens_per_call
-    return (
-        input_tokens * _model_info_cache["cost_per_input_token"]
-        + output_tokens * _model_info_cache["cost_per_output_token"]
-    )
-
-
 def _add_cost(messages, response_text: str, stats: Dict):
     global _cost_tracker
     if isinstance(messages, list):
@@ -390,9 +375,6 @@ def assort(
     min_clusters: int = 2,
     max_clusters: int = 5,
     description: str = "",
-    print_estimate: bool = False,
-    confirm: bool = False,
-    max_budget: Optional[float] = None,
     model: Optional[str] = None,
     rename_final: bool = True,
 ) -> (Dict[str, object], Dict[str, object]):
@@ -434,21 +416,8 @@ def assort(
         results = {"sorted_results": {}}
         stats["elapsed_seconds"] = time() - start_time
         stats["cost_usd"] = _cost_tracker
+        print(f"Total cost: ${stats['cost_usd']:.6f} USD")
         return results, stats
-    if print_estimate or confirm or max_budget is not None:
-        est = _estimate_cost(items)
-        if max_budget is not None and est > max_budget:
-            results = {"sorted_results": {}}
-            stats["elapsed_seconds"] = time() - start_time
-            stats["cost_usd"] = 0.0
-            return results, stats
-        if confirm:
-            proceed = input("Proceed? (y or n): ").lower().strip()
-            if proceed != "y":
-                results = {"sorted_results": {}}
-                stats["elapsed_seconds"] = time() - start_time
-                stats["cost_usd"] = 0.0
-                return results, stats
     initial_categories = _gen_categories(
         items, min_clusters, max_clusters, description, stats
     )
@@ -520,5 +489,6 @@ def assort(
     stats["category_sizes"] = {k: len(v) for k, v in sorted_results.items()}
     stats["elapsed_seconds"] = time() - start_time
     stats["cost_usd"] = _cost_tracker
+    print(f"Total cost: ${stats['cost_usd']:.6f} USD")
     results = {"sorted_results": sorted_results}
     return results, stats
