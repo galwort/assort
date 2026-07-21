@@ -462,6 +462,7 @@ def assort(
                     sorted_results[choice(highs)].append(t)
             else:
                 sorted_results[choice(highs)].append(t)
+        _refine_misc(sorted_results, min_clusters, max_clusters, description, stats)
         evict = [
             key
             for key, value in sorted_results.items()
@@ -469,7 +470,6 @@ def assort(
         ]
         for key in evict:
             sorted_results["Miscellaneous"].extend(sorted_results.pop(key))
-    _refine_misc(sorted_results, min_clusters, max_clusters, description, stats)
     if rename_final:
         mapping = _rename_categories(sorted_results, description, stats)
         if mapping:
