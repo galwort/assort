@@ -416,7 +416,6 @@ def assort(
         results = {"sorted_results": {}}
         stats["elapsed_seconds"] = time() - start_time
         stats["cost_usd"] = _cost_tracker
-        print(f"Total cost: ${stats['cost_usd']:.6f} USD")
         return results, stats
     initial_categories = _gen_categories(
         items, min_clusters, max_clusters, description, stats
@@ -496,6 +495,5 @@ def assort(
     stats["category_sizes"] = {k: len(v) for k, v in sorted_results.items()}
     stats["elapsed_seconds"] = time() - start_time
     stats["cost_usd"] = _cost_tracker
-    print(f"Total cost: ${stats['cost_usd']:.6f} USD")
     results = {"sorted_results": sorted_results}
     return results, stats
