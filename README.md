@@ -80,6 +80,7 @@ results, stats = assort(
     description="",
     model=None,
     rename_final=True,
+    show_progress=False,
 )
 ```
 
@@ -99,6 +100,9 @@ Parameters
 
 - `rename_final`
   If true, the library proposes clearer category names at the end based on samples from each group.
+
+- `show_progress`
+  If true, displays progress while items are assorted.
 
 Returns
 
@@ -141,7 +145,7 @@ Returns
 ## Cost and tokens
 
 - Token accounting uses `tiktoken` with an encoder chosen for the active model.
-- The final `cost_usd` is calculated from token counts and an internal price table and printed after each run.
+- The final `cost_usd` is calculated from token counts and an internal price table.
 
 ## Advanced examples
 

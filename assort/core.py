@@ -5,6 +5,7 @@ from random import choice, shuffle
 from time import sleep, time
 from typing import List, Dict, Optional, Set
 from tiktoken import encoding_for_model, get_encoding
+from tqdm import tqdm
 from datetime import datetime
 import json
 
@@ -377,6 +378,7 @@ def assort(
     description: str = "",
     model: Optional[str] = None,
     rename_final: bool = True,
+    show_progress: bool = False,
 ) -> (Dict[str, object], Dict[str, object]):
     global _MODEL, _model_info_cache, _encoder, _cost_tracker
     start_time = time()
@@ -428,7 +430,9 @@ def assort(
     sorted_results["Miscellaneous"] = []
     combo_counts: Dict[str, int] = {}
     combo_block: Set[str] = set()
-    for i, t in enumerate(items):
+    for i, t in enumerate(
+        tqdm(items, desc="Assorting", disable=not show_progress)
+    ):
         cats = list(sorted_results.keys())
         if "Miscellaneous" in cats:
             cats.remove("Miscellaneous")
