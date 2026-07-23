@@ -97,7 +97,8 @@ Parameters
 
 - `model`
   Optional LangChain model name, preferably in `"provider:model"` format. If
-  omitted, the existing OpenAI default is used.
+  omitted, the existing OpenAI default is used. The selected model must support
+  structured output through its LangChain integration.
 
 - `rename_final`
   If true, the library proposes clearer category names at the end based on samples from each group.

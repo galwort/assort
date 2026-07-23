@@ -1,6 +1,5 @@
 from enum import Enum
 from langchain.chat_models import init_chat_model
-from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, create_model
 from random import choice, shuffle
 from time import sleep, time
@@ -106,23 +105,6 @@ def _add_cost(messages, response_text: str, stats: Dict):
     stats["tokens"]["output"] += int(output_tokens)
 
 
-def _invoke_structured(messages, schema):
-    parser = PydanticOutputParser(pydantic_object=schema)
-    formatted_messages = [dict(message) for message in messages]
-    formatted_messages[0]["content"] += (
-        "\n\nFollow these output-format instructions exactly:\n"
-        + parser.get_format_instructions()
-    )
-    response = _client.invoke(formatted_messages)
-    response_text = response.content
-    if isinstance(response_text, list):
-        response_text = "".join(
-            block if isinstance(block, str) else block.get("text", "")
-            for block in response_text
-        )
-    return parser.parse(response_text)
-
-
 def _select_corpus(
     batch: List[str], randomize: bool = True, ratio: float = 0.4
 ) -> List[str]:
@@ -169,7 +151,7 @@ def _gen_categories(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _invoke_structured(messages, CategoryModel)
+            response = _client.with_structured_output(CategoryModel).invoke(messages)
             cats = [
                 c
                 for c in response.categories
@@ -214,7 +196,7 @@ def _gen_sort(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _invoke_structured(messages, SortModel)
+            response = _client.with_structured_output(SortModel).invoke(messages)
             data = response.model_dump()
             _add_cost(messages, json.dumps({k: str(v) for k, v in data.items()}), stats)
             return data
@@ -234,7 +216,7 @@ def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
     messages = [sys, {"role": "user", "content": user_message}]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _invoke_structured(messages, CombineDecision)
+            response = _client.with_structured_output(CombineDecision).invoke(messages)
             decision = response.decision
             _add_cost(messages, decision.value, stats)
             if decision == ConfidenceLevel.high:
@@ -249,7 +231,9 @@ def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
                 ]
                 for attempt_name in range(1, MAX_RETRIES + 1):
                     try:
-                        name_resp = _invoke_structured(name_messages, OutputFormat)
+                        name_resp = _client.with_structured_output(OutputFormat).invoke(
+                            name_messages
+                        )
                         name = name_resp.output.strip()
                         _add_cost(name_messages, name, stats)
                         if name:
@@ -292,7 +276,7 @@ def _rename_categories(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _invoke_structured(messages, OutputFormat)
+            response = _client.with_structured_output(OutputFormat).invoke(messages)
             text = response.output
             _add_cost(messages, text, stats)
             try:
