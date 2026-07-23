@@ -1,4 +1,5 @@
 from enum import Enum
+from genai_prices import UpdatePrices, Usage, calc_price
 from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, create_model
 from random import choice, shuffle
@@ -6,7 +7,6 @@ from time import sleep, time
 from typing import List, Dict, Optional, Set
 from tiktoken import encoding_for_model, get_encoding
 from tqdm import tqdm
-from datetime import datetime
 import json
 
 
@@ -29,80 +29,101 @@ class CombineDecision(BaseModel):
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
-PRICING_TABLE = {
-    "gpt-5.6-luna": {
-        "context_window": 1_050_000,
-        "input_per_1m": 1.00,
-        "output_per_1m": 6.00,
-        "encoding": "o200k_base",
-    },
-    "gpt-4o": {
-        "context_window": 200000,
-        "input_per_1m": 2.50,
-        "output_per_1m": 10.00,
-        "encoding": "o200k_base",
-    },
-    "gpt-4o-mini": {
-        "context_window": 200000,
-        "input_per_1m": 0.15,
-        "output_per_1m": 0.60,
-        "encoding": "o200k_base",
-    },
-    "gpt-3.5-turbo": {
-        "context_window": 16385,
-        "input_per_1m": 3.00,
-        "output_per_1m": 6.00,
-        "encoding": "cl100k_base",
-    },
-}
 
 _client = None
 _MODEL = DEFAULT_MODEL
 _model_info_cache = {}
 _encoder = get_encoding("cl100k_base")
 _cost_tracker = 0.0
+_price_updater = UpdatePrices()
+_price_updater_started = False
 MAX_RETRIES = 10
 
 
-def _resolve_model_info(model: str) -> Dict[str, float]:
-    model_name = model.split(":", 1)[-1]
-    info = PRICING_TABLE.get(
-        model_name,
-        {
-            "context_window": 100000,
-            "input_per_1m": 0.50,
-            "output_per_1m": 1.50,
-            "encoding": "cl100k_base",
-        },
+def _resolve_model_info(model: str) -> Dict[str, object]:
+    provider_id, separator, model_name = model.partition(":")
+    if not separator:
+        model_name = provider_id
+        provider_id = None
+    elif provider_id == "azure_openai":
+        provider_id = "azure"
+
+    profile = getattr(_client, "profile", None) or {}
+    context_window = (
+        profile.get("max_input_tokens") if isinstance(profile, dict) else None
     )
+    if not context_window:
+        try:
+            pricing = calc_price(Usage(), model_name, provider_id=provider_id)
+            context_window = pricing.model.context_window
+        except (LookupError, ValueError):
+            pass
+
     try:
         enc = encoding_for_model(model_name)
     except Exception:
-        try:
-            enc = get_encoding(info.get("encoding", "cl100k_base"))
-        except Exception:
-            enc = get_encoding("cl100k_base")
+        is_openai_model = provider_id == "openai" or (
+            provider_id is None and model_name.startswith(("gpt-", "o"))
+        )
+        enc = get_encoding("o200k_base" if is_openai_model else "cl100k_base")
+
     return {
-        "context_window": int(info["context_window"]),
-        "cost_per_input_token": float(info["input_per_1m"]) / 1_000_000.0,
-        "cost_per_output_token": float(info["output_per_1m"]) / 1_000_000.0,
+        "provider_id": provider_id,
+        "model_name": model_name,
+        "context_window": int(context_window or 100000),
         "encoding": enc,
     }
 
 
-def _add_cost(messages, response_text: str, stats: Dict):
+def _add_cost(response, messages, response_text: str, stats: Dict):
     global _cost_tracker
-    if isinstance(messages, list):
-        input_tokens = sum(len(_encoder.encode(m.get("content", ""))) for m in messages)
+    usage_metadata = getattr(response, "usage_metadata", None) or {}
+    input_details = usage_metadata.get("input_token_details", {})
+    output_details = usage_metadata.get("output_token_details", {})
+
+    if usage_metadata:
+        input_tokens = int(usage_metadata.get("input_tokens", 0) or 0)
+        output_tokens = int(usage_metadata.get("output_tokens", 0) or 0)
     else:
-        input_tokens = len(_encoder.encode(messages.get("content", "")))
-    output_tokens = len(_encoder.encode(response_text or ""))
-    _cost_tracker += (
-        input_tokens * _model_info_cache["cost_per_input_token"]
-        + output_tokens * _model_info_cache["cost_per_output_token"]
-    )
+        if isinstance(messages, list):
+            input_tokens = sum(
+                len(_encoder.encode(m.get("content", ""))) for m in messages
+            )
+        else:
+            input_tokens = len(_encoder.encode(messages.get("content", "")))
+        output_tokens = len(_encoder.encode(response_text or ""))
+
     stats["tokens"]["input"] += int(input_tokens)
     stats["tokens"]["output"] += int(output_tokens)
+
+    if _cost_tracker is None:
+        return
+
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    model_name = (
+        usage_metadata.get("model_name")
+        or response_metadata.get("model_name")
+        or response_metadata.get("model")
+        or _model_info_cache["model_name"]
+    )
+    usage = Usage(
+        input_tokens=input_tokens,
+        cache_write_tokens=int(input_details.get("cache_creation", 0) or 0),
+        cache_read_tokens=int(input_details.get("cache_read", 0) or 0),
+        output_tokens=output_tokens,
+        input_audio_tokens=int(input_details.get("audio", 0) or 0),
+        output_audio_tokens=int(output_details.get("audio", 0) or 0),
+    )
+    try:
+        price = calc_price(
+            usage,
+            model_name,
+            provider_id=_model_info_cache["provider_id"],
+        )
+    except (LookupError, ValueError):
+        _cost_tracker = None
+    else:
+        _cost_tracker += float(price.total_price)
 
 
 def _select_corpus(
@@ -151,16 +172,18 @@ def _gen_categories(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.with_structured_output(CategoryModel).invoke(messages)
+            response = _client.with_structured_output(
+                CategoryModel, include_raw=True
+            ).invoke(messages)
             cats = [
                 c
-                for c in response.categories
+                for c in response["parsed"].categories
                 if isinstance(c, str) and c.strip()
             ]
             if not cats:
                 cats = ["General"]
             cats = list(dict.fromkeys(cats))
-            _add_cost(messages, json.dumps(cats), stats)
+            _add_cost(response["raw"], messages, json.dumps(cats), stats)
             return cats
         except Exception:
             stats["retries"] += 1
@@ -196,9 +219,16 @@ def _gen_sort(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.with_structured_output(SortModel).invoke(messages)
-            data = response.model_dump()
-            _add_cost(messages, json.dumps({k: str(v) for k, v in data.items()}), stats)
+            response = _client.with_structured_output(
+                SortModel, include_raw=True
+            ).invoke(messages)
+            data = response["parsed"].model_dump()
+            _add_cost(
+                response["raw"],
+                messages,
+                json.dumps({k: str(v) for k, v in data.items()}),
+                stats,
+            )
             return data
         except Exception:
             stats["retries"] += 1
@@ -216,9 +246,11 @@ def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
     messages = [sys, {"role": "user", "content": user_message}]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.with_structured_output(CombineDecision).invoke(messages)
-            decision = response.decision
-            _add_cost(messages, decision.value, stats)
+            response = _client.with_structured_output(
+                CombineDecision, include_raw=True
+            ).invoke(messages)
+            decision = response["parsed"].decision
+            _add_cost(response["raw"], messages, decision.value, stats)
             if decision == ConfidenceLevel.high:
                 stats["combination_attempts"] += 1
                 stats["calls"]["combine_name"] += 1
@@ -231,11 +263,11 @@ def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
                 ]
                 for attempt_name in range(1, MAX_RETRIES + 1):
                     try:
-                        name_resp = _client.with_structured_output(OutputFormat).invoke(
-                            name_messages
-                        )
-                        name = name_resp.output.strip()
-                        _add_cost(name_messages, name, stats)
+                        name_resp = _client.with_structured_output(
+                            OutputFormat, include_raw=True
+                        ).invoke(name_messages)
+                        name = name_resp["parsed"].output.strip()
+                        _add_cost(name_resp["raw"], name_messages, name, stats)
                         if name:
                             stats["combined_merges"] += 1
                             return name
@@ -276,9 +308,11 @@ def _rename_categories(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.with_structured_output(OutputFormat).invoke(messages)
-            text = response.output
-            _add_cost(messages, text, stats)
+            response = _client.with_structured_output(
+                OutputFormat, include_raw=True
+            ).invoke(messages)
+            text = response["parsed"].output
+            _add_cost(response["raw"], messages, text, stats)
             try:
                 mapping = json.loads(text)
             except Exception:
@@ -374,14 +408,21 @@ def assort(
     show_progress: bool = False,
 ) -> (Dict[str, object], Dict[str, object]):
     global _client, _MODEL, _model_info_cache, _encoder, _cost_tracker
+    global _price_updater_started
     start_time = time()
     _MODEL = model or DEFAULT_MODEL
     _client = init_chat_model(_MODEL)
+    if not _price_updater_started:
+        try:
+            _price_updater.start(wait=5)
+        except Exception:
+            pass
+        _price_updater_started = True
     info = _resolve_model_info(_MODEL)
     _model_info_cache = {
+        "provider_id": info["provider_id"],
+        "model_name": info["model_name"],
         "context_window": info["context_window"],
-        "cost_per_input_token": info["cost_per_input_token"],
-        "cost_per_output_token": info["cost_per_output_token"],
     }
     _encoder = info["encoding"]
     _cost_tracker = 0.0

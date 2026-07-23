@@ -124,7 +124,8 @@ Returns
   - `tokens` with `input` and `output` counts
   - `combination_attempts` and `combined_merges`
   - `elapsed_seconds`
-  - `cost_usd` calculated from token counts and the internal price table
+  - `cost_usd` estimated from token usage and current model pricing, or `None`
+    when pricing is unavailable
   - `category_sizes` mapping category to item count
 
 ## How it works
@@ -146,8 +147,14 @@ Returns
 
 ## Cost and tokens
 
-- Token accounting uses `tiktoken` with an encoder chosen for the active model.
-- The final `cost_usd` is calculated from token counts and an internal price table.
+- Token accounting uses the provider-reported LangChain usage metadata when it
+  is available. `tiktoken` remains the fallback and is used for pre-call corpus
+  sizing.
+- Model prices come from the maintained `genai-prices` registry. Assort checks
+  for current pricing when the first run starts and falls back to the registry
+  snapshot included with the installed package if that check is unavailable.
+- `cost_usd` is an estimate. It is `None` for custom or unlisted models rather
+  than applying a made-up default price.
 
 ## Use another model provider
 
