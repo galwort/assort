@@ -96,7 +96,8 @@ Parameters
   Optional corpus context. Helps the model choose better category boundaries and names.
 
 - `model`
-  Optional model name to override the default. If omitted, a capable multimodal GPT model is used by default.
+  Optional LangChain model name, preferably in `"provider:model"` format. If
+  omitted, the existing OpenAI default is used.
 
 - `rename_final`
   If true, the library proposes clearer category names at the end based on samples from each group.
@@ -147,6 +148,23 @@ Returns
 - Token accounting uses `tiktoken` with an encoder chosen for the active model.
 - The final `cost_usd` is calculated from token counts and an internal price table.
 
+## Use another model provider
+
+Install the provider's LangChain integration, configure its API key, and pass a
+`"provider:model"` string through the existing `model` argument.
+
+```bash
+pip install langchain-anthropic
+export ANTHROPIC_API_KEY=your_key_here
+```
+
+```python
+results, stats = assort(
+    texts,
+    model="anthropic:claude-sonnet-4-6",
+)
+```
+
 ## Advanced examples
 
 Run and keep original names
@@ -178,4 +196,4 @@ for name, count in by_size:
 ## Behavior notes
 
 - Non deterministic sampling is used during corpus selection, so runs can vary.
-- The module keeps a single OpenAI client and encoder in module scope. In process concurrency is not recommended. Use separate processes for parallel work.
+- The module keeps a single LangChain client and encoder in module scope. In process concurrency is not recommended. Use separate processes for parallel work.

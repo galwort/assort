@@ -1,5 +1,6 @@
 from enum import Enum
-from openai import OpenAI, OpenAIError
+from langchain.chat_models import init_chat_model
+from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, create_model
 from random import choice, shuffle
 from time import sleep, time
@@ -56,7 +57,7 @@ PRICING_TABLE = {
     },
 }
 
-_client = OpenAI()
+_client = None
 _MODEL = DEFAULT_MODEL
 _model_info_cache = {}
 _encoder = get_encoding("cl100k_base")
@@ -65,8 +66,9 @@ MAX_RETRIES = 10
 
 
 def _resolve_model_info(model: str) -> Dict[str, float]:
+    model_name = model.split(":", 1)[-1]
     info = PRICING_TABLE.get(
-        model,
+        model_name,
         {
             "context_window": 100000,
             "input_per_1m": 0.50,
@@ -75,7 +77,7 @@ def _resolve_model_info(model: str) -> Dict[str, float]:
         },
     )
     try:
-        enc = encoding_for_model(model)
+        enc = encoding_for_model(model_name)
     except Exception:
         try:
             enc = get_encoding(info.get("encoding", "cl100k_base"))
@@ -102,6 +104,23 @@ def _add_cost(messages, response_text: str, stats: Dict):
     )
     stats["tokens"]["input"] += int(input_tokens)
     stats["tokens"]["output"] += int(output_tokens)
+
+
+def _invoke_structured(messages, schema):
+    parser = PydanticOutputParser(pydantic_object=schema)
+    formatted_messages = [dict(message) for message in messages]
+    formatted_messages[0]["content"] += (
+        "\n\nFollow these output-format instructions exactly:\n"
+        + parser.get_format_instructions()
+    )
+    response = _client.invoke(formatted_messages)
+    response_text = response.content
+    if isinstance(response_text, list):
+        response_text = "".join(
+            block if isinstance(block, str) else block.get("text", "")
+            for block in response_text
+        )
+    return parser.parse(response_text)
 
 
 def _select_corpus(
@@ -150,12 +169,10 @@ def _gen_categories(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.responses.parse(
-                model=_MODEL, input=messages, text_format=CategoryModel
-            )
+            response = _invoke_structured(messages, CategoryModel)
             cats = [
                 c
-                for c in response.output_parsed.categories
+                for c in response.categories
                 if isinstance(c, str) and c.strip()
             ]
             if not cats:
@@ -163,7 +180,7 @@ def _gen_categories(
             cats = list(dict.fromkeys(cats))
             _add_cost(messages, json.dumps(cats), stats)
             return cats
-        except OpenAIError:
+        except Exception:
             stats["retries"] += 1
             sleep(min(30.0, 1.5**attempt))
     return ["General"]
@@ -197,13 +214,11 @@ def _gen_sort(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.responses.parse(
-                model=_MODEL, input=messages, text_format=SortModel
-            )
-            data = response.output_parsed.model_dump()
+            response = _invoke_structured(messages, SortModel)
+            data = response.model_dump()
             _add_cost(messages, json.dumps({k: str(v) for k, v in data.items()}), stats)
             return data
-        except OpenAIError:
+        except Exception:
             stats["retries"] += 1
             sleep(min(30.0, 1.5**attempt))
     return {k: ConfidenceLevel.low for k in keys}
@@ -219,10 +234,8 @@ def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
     messages = [sys, {"role": "user", "content": user_message}]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = _client.responses.parse(
-                model=_MODEL, input=messages, text_format=CombineDecision
-            )
-            decision = response.output_parsed.decision
+            response = _invoke_structured(messages, CombineDecision)
+            decision = response.decision
             _add_cost(messages, decision.value, stats)
             if decision == ConfidenceLevel.high:
                 stats["combination_attempts"] += 1
@@ -236,21 +249,19 @@ def _gen_combined_category(high_keys: List[str], stats: Dict) -> Optional[str]:
                 ]
                 for attempt_name in range(1, MAX_RETRIES + 1):
                     try:
-                        name_resp = _client.responses.parse(
-                            model=_MODEL, input=name_messages, text_format=OutputFormat
-                        )
-                        name = name_resp.output_parsed.output.strip()
+                        name_resp = _invoke_structured(name_messages, OutputFormat)
+                        name = name_resp.output.strip()
                         _add_cost(name_messages, name, stats)
                         if name:
                             stats["combined_merges"] += 1
                             return name
                         break
-                    except OpenAIError:
+                    except Exception:
                         stats["retries"] += 1
                         sleep(min(30.0, 1.5**attempt_name))
                 return None
             return None
-        except OpenAIError:
+        except Exception:
             stats["retries"] += 1
             sleep(min(30.0, 1.5**attempt))
     return None
@@ -281,10 +292,8 @@ def _rename_categories(
     ]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = _client.responses.parse(
-                model=_MODEL, input=messages, text_format=OutputFormat
-            )
-            text = resp.output_parsed.output
+            response = _invoke_structured(messages, OutputFormat)
+            text = response.output
             _add_cost(messages, text, stats)
             try:
                 mapping = json.loads(text)
@@ -304,7 +313,7 @@ def _rename_categories(
                 used.add(nm)
                 result[old] = nm
             return result
-        except OpenAIError:
+        except Exception:
             stats["retries"] += 1
             sleep(min(30.0, 1.5**attempt))
     return {}
@@ -380,9 +389,10 @@ def assort(
     rename_final: bool = True,
     show_progress: bool = False,
 ) -> (Dict[str, object], Dict[str, object]):
-    global _MODEL, _model_info_cache, _encoder, _cost_tracker
+    global _client, _MODEL, _model_info_cache, _encoder, _cost_tracker
     start_time = time()
     _MODEL = model or DEFAULT_MODEL
+    _client = init_chat_model(_MODEL)
     info = _resolve_model_info(_MODEL)
     _model_info_cache = {
         "context_window": info["context_window"],

@@ -4,7 +4,8 @@ version = "2.0.0"
 description = "Using AI to sort lists of unstructured text through iterative batches."
 readme = "README.md"
 dependencies = [
-    "openai>=1.14.0",
+    "langchain>=0.3.27,<2.0.0",
+    "langchain-openai>=0.3.35,<2.0.0",
     "tiktoken>=0.7.0",
     "tqdm>=4.65.0"
 ]
